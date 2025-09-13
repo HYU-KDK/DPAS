@@ -14,7 +14,7 @@ cd data
 wget -c http://wednesday.csail.mit.edu/joseph_result/state_and_transformation/release_dataset.zip -O mitstates.zip
 wget -c http://vision.cs.utexas.edu/projects/finegrained/utzap50k/ut-zap50k-images.zip -O utzap.zip
 wget -c https://senthilpurushwalkam.com/publications/compositional/compositional_split_natural.tar.gz -O compositional_split_natural.tar.gz
-wget -c https://s3.mlcloud.uni-tuebingen.de/czsl/cgqa-updated.zip -O cgqa.zip
+wget -c https://huggingface.co/datasets/nihalnayak/cgqa/resolve/main/cgqa.zip -O cgqa.zip
 
 
 # MIT-States
@@ -28,7 +28,7 @@ unzip utzap.zip -d ut-zap50k/
 mv ut-zap50k/ut-zap50k-images ut-zap50k/_images/
 
 # C-GQA
-unzip cgqa.zip -d cgqa/
+unzip -q cgqa.zip
 
 # Download new splits for Purushwalkam et. al
 tar -zxvf compositional_split_natural.tar.gz
