@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 from scipy.stats import hmean
+import torch.nn.functional as F
 from torch.utils.data.dataloader import DataLoader
 from tqdm import tqdm
 
@@ -391,22 +392,68 @@ def compute_representations(model, test_dataset, config, device):
     )
 
     rep = torch.Tensor().to(device).type(model.dtype)
+    rep_prim = torch.Tensor().to(device).type(model.dtype)
+    rep_ctx = torch.Tensor().to(device).type(model.dtype)
+
     with torch.no_grad():
         for batch_attr_obj in tqdm(test_pairs):
             batch_attr_obj = batch_attr_obj.to(device)
             token_tensors = model.construct_token_tensors(batch_attr_obj)
-            text_features = model.text_encoder(
-                model.token_ids,
-                token_tensors,
-                enable_pos_emb=model.enable_pos_emb,
-            )
+            
+            if isinstance(token_tensors, tuple):
+                # DPC Case: (prim, ctx)
+                token_tensor_prim, token_tensor_ctx = token_tensors
+                
+                # Encode Primitive
+                tf_prim = model.text_encoder(
+                    model.token_ids,
+                    token_tensor_prim,
+                    enable_pos_emb=model.enable_pos_emb,
+                )
+                tf_prim = tf_prim / tf_prim.norm(dim=-1, keepdim=True)
+                
+                # Encode Contextual
+                tf_ctx = model.text_encoder(
+                    model.token_ids,
+                    token_tensor_ctx,
+                    enable_pos_emb=model.enable_pos_emb,
+                )
+                tf_ctx = tf_ctx / tf_ctx.norm(dim=-1, keepdim=True)
+                
+                # Linearly combine features based on alpha
+                # Logit = alpha * (I @ P.T) + (1-alpha) * (I @ C.T) = I @ (alpha*P + (1-alpha)*C).T
+                # Use current alpha from model
+                # Re-normalize? 
+                # The dot product logic suggests we use the combined vector as acts.
+                # If we normalize again, we change the scale.
+                # However, the original code normalized text_features.
+                # Here we want to match the Forward pass of DPC Interface.
+                # DPC Forward: alpha * logits_prim + ... = alpha * (scale * norm_img @ norm_prim.T) ...
+                # = scale * norm_img @ (alpha * norm_prim + (1-alpha) * norm_ctx).T
+                # So the effective text representation is exactly (alpha * norm_prim + (1-alpha) * norm_ctx).
+                # No further normalization should be applied to the combined vector if we want to preserve the magnitude relative to alpha.
+                
+                if config.experiment_name == 'dpc_alpha':
+                    rep_prim = torch.cat([rep_prim, tf_prim], dim=0)
+                    rep_ctx = torch.cat([rep_ctx, tf_ctx], dim=0)
+                else:
+                    alpha = model.alpha
+                    text_features = alpha * tf_prim + (1 - alpha) * tf_ctx
+                    rep = torch.cat([rep, text_features], dim=0)
+            else:
+                text_features = model.text_encoder(
+                    model.token_ids,
+                    token_tensors,
+                    enable_pos_emb=model.enable_pos_emb,
+                )
 
-            text_features = text_features / text_features.norm(
-                dim=-1, keepdim=True
-            )
+                text_features = text_features / text_features.norm(
+                    dim=-1, keepdim=True
+                )
+                rep = torch.cat([rep, text_features], dim=0)
 
-            rep = torch.cat([rep, text_features], dim=0)
-
+    if config.experiment_name == 'dpc_alpha':
+        return rep_prim, rep_ctx
     return rep
 
 
@@ -486,12 +533,43 @@ def predict_logits(model, text_rep, dataset, device, config):
             normalized_img = batch_img_feat / batch_img_feat.norm(
                 dim=-1, keepdim=True
             )
+            logit_scale = model.clip_model.logit_scale.exp()
 
-            logits = (
-                model.clip_model.logit_scale.exp()
-                * normalized_img
-                @ text_rep.t()
-            )
+            if config.experiment_name == 'dpc_alpha':
+                tf_prim, tf_ctx = text_rep
+                logits_prim = logit_scale * normalized_img @ tf_prim.t()
+                
+                # Dynamic Gating logic
+                logits_prim_f32 = logits_prim.float()
+                log_probs_prim = F.log_softmax(logits_prim_f32, dim=-1)
+                entropy = -torch.sum(torch.exp(log_probs_prim) * log_probs_prim, dim=-1, keepdim=True)
+                num_classes = logits_prim.size(-1)
+                max_entropy = torch.log(torch.tensor(float(num_classes), device=device))
+                normalized_entropy = entropy / max_entropy
+                
+                max_logit = torch.max(logits_prim_f32, dim=-1, keepdim=True)[0]
+                # Detect if alpha_predictor expects 1 input (entropy only) or 2 inputs (entropy + max_logit)
+                try:
+                    num_inputs = model.alpha_predictor[0].in_features
+                except:
+                    num_inputs = 2 # default
+                
+                if num_inputs == 1:
+                    alpha_input_tensor = normalized_entropy
+                else:
+                    alpha_input_tensor = torch.cat([normalized_entropy, max_logit / logit_scale], dim=-1)
+                
+                alpha_input = model.gating_param.float() + model.alpha_predictor.float()(alpha_input_tensor)
+                alpha = torch.sigmoid(alpha_input).to(model.dtype)
+                
+                logits_ctx = logit_scale * normalized_img @ tf_ctx.t()
+                logits = alpha * logits_prim + (1 - alpha) * logits_ctx
+            else:
+                logits = (
+                    logit_scale
+                    * normalized_img
+                    @ text_rep.t()
+                )
 
             attr_truth, obj_truth, pair_truth = data[1], data[2], data[3]
             logits = logits.cpu()
@@ -724,8 +802,31 @@ if __name__ == "__main__":
     else:
         model, optimizer = get_model(val_dataset, config, device)
 
-        soft_embs = torch.load(config.soft_embeddings)['soft_embeddings']
-        model.set_soft_embeddings(soft_embs)
+        if config.experiment_name in ['dpc', 'dpc_alpha']:
+            checkpoint = torch.load(config.soft_embeddings, map_location=device)
+            with torch.no_grad():
+                model.soft_embeddings_primitive.copy_(checkpoint['soft_embeddings_primitive'])
+                model.soft_embeddings_contextual.copy_(checkpoint['soft_embeddings_contextual'])
+                if 'gating_param' in checkpoint:
+                     model.gating_param.copy_(checkpoint['gating_param'])
+                
+                if config.experiment_name == 'dpc_alpha' and 'alpha_predictor' in checkpoint:
+                    # Check for architectural mismatch in alpha_predictor
+                    ckpt_in_features = checkpoint['alpha_predictor']['0.weight'].shape[1]
+                    curr_in_features = model.alpha_predictor[0].in_features
+                    if ckpt_in_features != curr_in_features:
+                        print(f"Adapting alpha_predictor architecture: {curr_in_features} -> {ckpt_in_features} in_features")
+                        model.alpha_predictor[0] = torch.nn.Linear(ckpt_in_features, 16).to(device)
+                    
+                    model.alpha_predictor.load_state_dict(checkpoint['alpha_predictor'])
+                    print("Loaded DPC-Alpha model.")
+                else:
+                    print(f"Loaded DPC model. Alpha: {model.alpha.item():.4f}")
+
+        else:
+            soft_embs = torch.load(config.soft_embeddings)['soft_embeddings']
+            model.set_soft_embeddings(soft_embs)
+            
         val_text_rep = compute_representations(
             model, val_dataset, config, device)
         test_text_rep = compute_representations(

@@ -91,6 +91,7 @@ def csp_init(
 
     soft_embedding = torch.zeros(
         (len(attributes) + len(classes), orig_token_embedding.size(-1)),
+        device=device
     )
     for idx, rep in enumerate(orig_token_embedding):
         eos_idx = tokenized[idx].argmax()

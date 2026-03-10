@@ -1,3 +1,4 @@
+import os
 from itertools import product
 
 import numpy as np
@@ -16,7 +17,7 @@ n_px = 224
 
 def transform_image(split="train", imagenet=False):
     if imagenet:
-        # from czsl repo.
+        # from czslRepo.
         mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
         transform = Compose(
             [
@@ -70,6 +71,10 @@ class ImageLoader:
 
     def __call__(self, img):
         file = '%s/%s' % (self.img_dir, img)
+        if not os.path.exists(file):
+            parent, filename = os.path.split(img)
+            parent = parent.replace('_', ' ')
+            file = '%s/%s/%s' % (self.img_dir, parent, filename)
         img = Image.open(file).convert('RGB')
         return img
 

@@ -47,7 +47,14 @@ class CustomTextEncoder(torch.nn.Module):
             else text_features
         )
         x = x.permute(1, 0, 2)
-        x = self.transformer(x)
+        
+        # Use gradient checkpointing for transformer layers to save memory
+        if self.training:
+            for block in self.transformer.resblocks:
+                x = torch.utils.checkpoint.checkpoint(block, x, use_reentrant=False)
+        else:
+            x = self.transformer(x)
+            
         x = x.permute(1, 0, 2)
         x = self.ln_final(x)
         tf = (

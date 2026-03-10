@@ -16,6 +16,19 @@ def get_model(train_dataset, config, device):
     # special experimental setup
     elif config.experiment_name == "mix_csp":
         return get_mix_csp(train_dataset, config, device)
+    
+    elif config.experiment_name == "dpc":
+        from models.dpc import get_dpc
+        return get_dpc(train_dataset, config, device)
+
+    elif config.experiment_name in ["dpc_alpha", "dpc_alpha_frozen_csp"]:
+        from models.dpc_alpha import get_dpc_alpha
+        return get_dpc_alpha(train_dataset, config, device)
+
+    elif config.experiment_name == "dpas":
+        from models.dpas import get_dpas
+        return get_dpas(train_dataset, config, device)
+
     else:
         raise NotImplementedError(
             "Error: Unrecognized Experiment Name {:s}.".format(

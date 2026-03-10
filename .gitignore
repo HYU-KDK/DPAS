@@ -132,3 +132,7 @@ data/
 .idea
 
 wandb/
+checkpoint/
+logs/
+*.pt
+*.pth
