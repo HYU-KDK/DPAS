@@ -1,0 +1,48 @@
+model:
+  model_name: cluspro_baseline
+  prompt_template: ["a photo of x x", "a photo of x", "a photo of x"]
+  ctx_init: ["a photo of ", "a photo of ", "a photo of "]
+  clip_model: "ViT-B/16"
+  clip_arch: "ViT-B/16"
+  adapter_dim: 64
+  adapter_dropout: 0.1
+  cluster_num: 5
+  proto_momentum: 0.99
+  pair_loss_weight: 1.0
+  pair_inference_weight: 1.0
+  attr_loss_weight: 1.0
+  attr_inference_weight: 1.0
+  obj_loss_weight: 1.0
+  obj_inference_weight: 1.0
+  contrastive_weight: 0.1
+  hsic_weight: 0.1
+
+train:
+  dataset: mit-states
+  dataset_path: /home/dkkim/.gemini/antigravity/scratch/csp/data/mit-states
+  optimizer: Adam
+  scheduler: StepLR
+  step_size: 5
+  gamma: 0.5
+  lr: 0.0001
+  attr_dropout: 0.3
+  weight_decay: 0.00001
+  context_length: 8
+  train_batch_size: 8
+  gradient_accumulation_steps: 8
+  seed: 0
+  epochs: 15
+  epoch_start: 0
+  save_path: checkpoint/cluspro_baseline_b16_mit
+  save_every_n: 1
+  val_metric: best_hm
+  save_final_model: True
+
+test:
+  eval_batch_size: 32
+  open_world: False
+  topk: 1
+  text_encoder_batch_size: 32
+  threshold_trials: 50
+  bias: 0.001
+  text_first: True
