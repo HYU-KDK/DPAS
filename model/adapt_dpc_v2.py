@@ -101,6 +101,7 @@ class AdaptDPCv2(nn.Module):
         self.classes = classes
         self.offset = offset
         self.enable_pos_emb = True
+        self.use_vaps = getattr(config, 'use_vaps', True)
 
         dtype = self.clip.dtype or torch.float16
         self.dtype = dtype
@@ -233,8 +234,8 @@ class AdaptDPCv2(nn.Module):
             x = block.mlp(block.ln_2(x))
             x = x + adapt_x + residual
 
-            # [MSCI] Capture f_local at mid-layer
-            if i == self.feature_layer:
+            # [MSCI] Capture f_local at mid-layer (only when VAPS enabled)
+            if self.use_vaps and i == self.feature_layer:
                 f_local = x[0].detach()  # CLS token: [B, vision_width]
 
         x = x.permute(1, 0, 2)  # LND -> NLD
@@ -353,6 +354,18 @@ class AdaptDPCv2(nn.Module):
         for i in range(self.token_ids.shape[0]):
             feat, _ = self.text_encoder(
                 self.token_ids[i], tokens_prim[i], enable_pos_emb=self.enable_pos_emb
+            )
+            text_feats.append(feat / feat.norm(dim=-1, keepdim=True))
+        return text_feats
+
+    def _encode_text_ctx_static(self, pair_idx):
+        """Encode contextual text without VAPS (no per-image shift)."""
+        embs = self.attr_dropout(self.soft_att_obj_ctx)
+        tokens_ctx = self._construct_token_tensors(pair_idx, embs)
+        text_feats = []
+        for i in range(self.token_ids.shape[0]):
+            feat, _ = self.text_encoder(
+                self.token_ids[i], tokens_ctx[i], enable_pos_emb=self.enable_pos_emb
             )
             text_feats.append(feat / feat.norm(dim=-1, keepdim=True))
         return text_feats
@@ -485,22 +498,23 @@ class AdaptDPCv2(nn.Module):
         logits_prim_attr = logit_scale * f_attr_norm @ text_prim[1].t()
         logits_prim_obj = logit_scale * f_obj_norm @ text_prim[2].t()
 
-        # ---- 6. Contextual branch with VAPS ----
-        if f_local is not None:
-            shift = self.prompt_shifter(f_local.float())
+        # ---- 6. Contextual branch ----
+        if self.use_vaps:
+            if f_local is not None:
+                shift = self.prompt_shifter(f_local.float())
+            else:
+                shift = torch.zeros(B, f_global.shape[-1], device=f_global.device)
+            shifted_comp_feats, ctx_attr_feat, ctx_obj_feat = \
+                self._encode_text_ctx_shifted(idx, shift)
+            logits_ctx_comp = logit_scale * torch.bmm(
+                f_global_norm.unsqueeze(1), shifted_comp_feats.transpose(1, 2)
+            ).squeeze(1)  # [B, N]
         else:
-            shift = torch.zeros(B, f_global.shape[-1], device=f_global.device)
+            text_ctx = self._encode_text_ctx_static(idx)
+            logits_ctx_comp = logit_scale * f_global_norm @ text_ctx[0].t()
+            ctx_attr_feat = text_ctx[1]
+            ctx_obj_feat = text_ctx[2]
 
-        shifted_comp_feats, ctx_attr_feat, ctx_obj_feat = \
-            self._encode_text_ctx_shifted(idx, shift)
-
-        # Batched comp logits: [B, N] via batched matmul
-        # f_global_norm: [B, D], shifted_comp_feats: [B, N, D]
-        logits_ctx_comp = logit_scale * torch.bmm(
-            f_global_norm.unsqueeze(1), shifted_comp_feats.transpose(1, 2)
-        ).squeeze(1)  # [B, N]
-
-        # attr/obj logits use disentangled features
         logits_ctx_attr = logit_scale * f_attr_norm @ ctx_attr_feat.t()
         logits_ctx_obj = logit_scale * f_obj_norm @ ctx_obj_feat.t()
 
@@ -536,18 +550,22 @@ class AdaptDPCv2(nn.Module):
         logits_prim_attr = logit_scale * f_attr_norm @ text_prim[1].t()
         logits_prim_obj = logit_scale * f_obj_norm @ text_prim[2].t()
 
-        # Contextual branch with VAPS
-        if f_local is not None:
-            shift = self.prompt_shifter(f_local.float())
+        # Contextual branch
+        if self.use_vaps:
+            if f_local is not None:
+                shift = self.prompt_shifter(f_local.float())
+            else:
+                shift = torch.zeros(B, f_global.shape[-1], device=f_global.device)
+            shifted_comp_feats, ctx_attr_feat, ctx_obj_feat = \
+                self._encode_text_ctx_shifted(idx, shift)
+            logits_ctx_comp = logit_scale * torch.bmm(
+                f_global_norm.unsqueeze(1), shifted_comp_feats.transpose(1, 2)
+            ).squeeze(1)
         else:
-            shift = torch.zeros(B, f_global.shape[-1], device=f_global.device)
-
-        shifted_comp_feats, ctx_attr_feat, ctx_obj_feat = \
-            self._encode_text_ctx_shifted(idx, shift)
-
-        logits_ctx_comp = logit_scale * torch.bmm(
-            f_global_norm.unsqueeze(1), shifted_comp_feats.transpose(1, 2)
-        ).squeeze(1)
+            text_ctx = self._encode_text_ctx_static(idx)
+            logits_ctx_comp = logit_scale * f_global_norm @ text_ctx[0].t()
+            ctx_attr_feat = text_ctx[1]
+            ctx_obj_feat = text_ctx[2]
 
         logits_ctx_attr = logit_scale * f_attr_norm @ ctx_attr_feat.t()
         logits_ctx_obj = logit_scale * f_obj_norm @ ctx_obj_feat.t()

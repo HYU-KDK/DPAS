@@ -53,6 +53,7 @@ parser.add_argument("--attr_inference_weight", type=float, default=1.0)
 parser.add_argument("--obj_inference_weight", type=float, default=1.0)
 
 # MSCI + VAPS + DHNO
+parser.add_argument("--use_vaps", help="enable VAPS (Visual-Adaptive Prompt Shifting)", type=bool, default=True)
 parser.add_argument("--feature_layer", help="ViT block for f_local (MSCI)", type=int, default=6)
 parser.add_argument("--freeze_primitive", help="freeze primitive soft embeddings (VAPS)", action="store_true")
 parser.add_argument("--dhno_lambda", help="DHNO contrastive loss weight", type=float, default=0.3)
